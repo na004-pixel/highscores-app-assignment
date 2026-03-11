@@ -1,0 +1,2885 @@
+#---------/admin/Dockerfile/-----------
+FROM node:22-alpine
+
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm ci
+
+COPY . .
+
+EXPOSE 3001
+
+CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "3001"]
+
+
+#---------/admin/index.html/-----------
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Question Admin</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/index.tsx"></script>
+  </body>
+</html>
+
+
+#---------/admin/package.json/-----------
+{
+  "name": "adaptive-test-admin",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "solid-js": "^1.8.0",
+    "papaparse": "^5.4.1"
+  },
+  "devDependencies": {
+    "vite": "^5.0.0",
+    "vite-plugin-solid": "^2.8.0",
+    "typescript": "^5.3.0",
+    "@types/papaparse": "^5.3.14"
+  }
+}
+
+
+#---------/admin/src/App.tsx/-----------
+import { createSignal, createResource, Show, For } from 'solid-js';
+import QuestionList from './components/QuestionList';
+import QuestionForm from './components/QuestionForm';
+import CsvUpload from './components/CsvUpload';
+import { getQuestions } from './services/api';
+
+export type Question = {
+  id: string;
+  text: string;
+  options: string[];
+  correct_answer: string;
+  difficulty: number;
+  topic: string;
+  tags: string[];
+};
+
+export type View = 'list' | 'add' | 'edit' | 'upload';
+
+export default function App() {
+  const [view, setView] = createSignal<View>('list');
+  const [editingQuestion, setEditingQuestion] = createSignal<Question | null>(null);
+  const [refreshTrigger, setRefreshTrigger] = createSignal(0);
+
+  const [questions, { refetch }] = createResource(refreshTrigger, async () => {
+    return await getQuestions();
+  });
+
+  const handleRefresh = () => {
+    setRefreshTrigger((prev) => prev + 1);
+  };
+
+  const handleEdit = (question: Question) => {
+    setEditingQuestion(question);
+    setView('edit');
+  };
+
+  const handleAdd = () => {
+    setEditingQuestion(null);
+    setView('add');
+  };
+
+  const handleCancel = () => {
+    setEditingQuestion(null);
+    setView('list');
+  };
+
+  const handleSaved = () => {
+    handleCancel();
+    handleRefresh();
+  };
+
+  return (
+    <div class="admin-app">
+      <header class="header">
+        <h1>Question Admin</h1>
+        <nav class="nav">
+          <button class={`nav-btn ${view() === 'list' ? 'active' : ''}`} onClick={() => setView('list')}>
+            All Questions
+          </button>
+          <button class={`nav-btn ${view() === 'add' ? 'active' : ''}`} onClick={handleAdd}>
+            Add New
+          </button>
+          <button class={`nav-btn ${view() === 'upload' ? 'active' : ''}`} onClick={() => setView('upload')}>
+            CSV Upload
+          </button>
+        </nav>
+      </header>
+
+      <main class="main">
+        <Show when={view() === 'list'}>
+          <QuestionList
+            questions={questions() || []}
+            loading={questions.loading}
+            onEdit={handleEdit}
+            onRefresh={handleRefresh}
+          />
+        </Show>
+
+        <Show when={view() === 'add' || view() === 'edit'}>
+          <QuestionForm
+            question={editingQuestion()}
+            onSave={handleSaved}
+            onCancel={handleCancel}
+          />
+        </Show>
+
+        <Show when={view() === 'upload'}>
+          <CsvUpload onUpload={handleRefresh} />
+        </Show>
+      </main>
+    </div>
+  );
+}
+
+
+#---------/admin/src/components/CsvUpload.tsx/-----------
+import { createSignal } from 'solid-js';
+import Papa from 'papaparse';
+import { bulkCreateQuestions, deleteAllQuestions } from '../services/api';
+
+interface CsvRow {
+  text: string;
+  topic: string;
+  difficulty: string;
+  option1: string;
+  option2: string;
+  option3: string;
+  option4: string;
+  correct_answer: string;
+  tags?: string;
+}
+
+interface CsvUploadProps {
+  onUpload: () => void;
+}
+
+export default function CsvUpload(props: CsvUploadProps) {
+  const [uploading, setUploading] = createSignal(false);
+  const [message, setMessage] = createSignal('');
+  const [preview, setPreview] = createSignal<CsvRow[]>([]);
+
+  const handleFile = (e: Event) => {
+    const file = (e.target as HTMLInputElement).files?.[0];
+    if (!file) return;
+
+    Papa.parse<CsvRow>(file, {
+      header: true,
+      skipEmptyLines: true,
+      complete: (results) => {
+        if (results.errors.length > 0) {
+          setMessage('Error parsing CSV: ' + results.errors[0].message);
+          return;
+        }
+        setPreview(results.data);
+        setMessage(`Preview: ${results.data.length} questions loaded`);
+      },
+    });
+  };
+
+  const handleUpload = async () => {
+    if (preview().length === 0) return;
+
+    const confirmMsg = 'This will replace ALL existing questions. Continue?';
+    if (!confirm(confirmMsg)) return;
+
+    setUploading(true);
+    setMessage('');
+
+    try {
+      await deleteAllQuestions();
+
+      const questions = preview().map((row) => ({
+        text: row.text,
+        topic: row.topic,
+        difficulty: parseFloat(row.difficulty) || 0,
+        options: [row.option1, row.option2, row.option3, row.option4],
+        correct_answer: row.correct_answer,
+        tags: row.tags ? row.tags.split(',').map((t) => t.trim()) : [],
+      }));
+
+      const result = await bulkCreateQuestions(questions);
+      setMessage(`Successfully uploaded ${result.inserted} questions!`);
+      setPreview([]);
+      props.onUpload();
+    } catch (err) {
+      setMessage('Failed to upload questions');
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  return (
+    <div class="csv-upload">
+      <h2>CSV Upload</h2>
+
+      <div class="csv-instructions">
+        <h3>CSV Format</h3>
+        <p>Upload a CSV with these columns:</p>
+        <code>text,topic,difficulty,option1,option2,option3,option4,correct_answer,tags</code>
+
+        <h3>Example:</h3>
+        <pre class="csv-example">
+text,topic,difficulty,option1,option2,option3,option4,correct_answer,tags
+"What is 2+2?",Math,0,A,B,C,D,B,"addition,basic"
+"What is H2O?",Science,-1,Water,Ice,Steam,Oxygen,Water,"chemistry,water"
+        </pre>
+      </div>
+
+      <div class="upload-section">
+        <input type="file" accept=".csv" onChange={handleFile} />
+      </div>
+
+      {message() && <div class={`message ${message().includes('Error') || message().includes('Failed') ? 'error' : 'success'}`}>{message()}</div>}
+
+      {preview().length > 0 && (
+        <>
+          <div class="preview-section">
+            <h3>Preview ({preview().length} questions)</h3>
+            <div class="preview-list">
+              {preview().slice(0, 5).map((row, i) => (
+                <div class="preview-item">
+                  <strong>{row.topic}</strong>: {row.text.substring(0, 50)}...
+                </div>
+              ))}
+              {preview().length > 5 && <div class="preview-more">...and {preview().length - 5} more</div>}
+            </div>
+          </div>
+
+          <button class="btn-primary" onClick={handleUpload} disabled={uploading()}>
+            {uploading() ? 'Uploading...' : 'Replace All Questions'}
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
+
+#---------/admin/src/components/QuestionForm.tsx/-----------
+import { createSignal } from 'solid-js';
+import type { Question } from '../App';
+import { createQuestion, updateQuestion } from '../services/api';
+
+interface QuestionFormProps {
+  question: Question | null;
+  onSave: () => void;
+  onCancel: () => void;
+}
+
+export default function QuestionForm(props: QuestionFormProps) {
+  const isEdit = () => props.question !== null;
+
+  const [text, setText] = createSignal(props.question?.text || '');
+  const [options, setOptions] = createSignal<string[]>(props.question?.options || ['', '', '', '']);
+  const [correctAnswer, setCorrectAnswer] = createSignal(props.question?.correct_answer || '');
+  const [difficulty, setDifficulty] = createSignal(props.question?.difficulty || 0);
+  const [topic, setTopic] = createSignal(props.question?.topic || '');
+  const [tags, setTags] = createSignal(props.question?.tags?.join(', ') || '');
+  const [saving, setSaving] = createSignal(false);
+  const [error, setError] = createSignal('');
+
+  const handleOptionChange = (index: number, value: string) => {
+    const newOptions = [...options()];
+    newOptions[index] = value;
+    setOptions(newOptions);
+  };
+
+  const handleSubmit = async (e: Event) => {
+    e.preventDefault();
+    setError('');
+
+    if (!text() || options().some(o => !o) || !correctAnswer() || !topic()) {
+      setError('Please fill in all required fields');
+      return;
+    }
+
+    if (!options().includes(correctAnswer())) {
+      setError('Correct answer must be one of the options');
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const data = {
+        text: text(),
+        options: options(),
+        correct_answer: correctAnswer(),
+        difficulty: difficulty(),
+        topic: topic(),
+        tags: tags().split(',').map(t => t.trim()).filter(Boolean),
+      };
+
+      if (isEdit()) {
+        await updateQuestion(props.question!.id, data);
+      } else {
+        await createQuestion(data);
+      }
+      props.onSave();
+    } catch (err) {
+      setError('Failed to save question');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div class="question-form-container">
+      <h2>{isEdit() ? 'Edit Question' : 'Add New Question'}</h2>
+
+      <form class="question-form" onSubmit={handleSubmit}>
+        <div class="form-group">
+          <label>Question Text *</label>
+          <textarea
+            value={text()}
+            onInput={(e) => setText(e.currentTarget.value)}
+            placeholder="Enter the question..."
+            rows={3}
+            required
+          />
+        </div>
+
+        <div class="form-group">
+          <label>Topic *</label>
+          <input
+            type="text"
+            value={topic()}
+            onInput={(e) => setTopic(e.currentTarget.value)}
+            placeholder="e.g., Math, Science, History"
+            required
+          />
+        </div>
+
+        <div class="form-group">
+          <label>Difficulty (-3 to 3) *</label>
+          <input
+            type="number"
+            step="0.1"
+            min="-3"
+            max="3"
+            value={difficulty()}
+            onInput={(e) => setDifficulty(parseFloat(e.currentTarget.value))}
+            required
+          />
+        </div>
+
+        <div class="form-group">
+          <label>Options *</label>
+          <div class="options-inputs">
+            {options().map((opt, i) => (
+              <div class="option-input-row">
+                <input
+                  type="radio"
+                  name="correct"
+                  checked={correctAnswer() === opt}
+                  onChange={() => setCorrectAnswer(opt)}
+                />
+                <input
+                  type="text"
+                  value={opt}
+                  onInput={(e) => handleOptionChange(i, e.currentTarget.value)}
+                  placeholder={`Option ${i + 1}`}
+                  required
+                />
+              </div>
+            ))}
+          </div>
+          <small class="hint">Select the radio button next to the correct answer</small>
+        </div>
+
+        <div class="form-group">
+          <label>Tags (comma separated)</label>
+          <input
+            type="text"
+            value={tags()}
+            onInput={(e) => setTags(e.currentTarget.value)}
+            placeholder="e.g., algebra, equations"
+          />
+        </div>
+
+        {error() && <div class="error">{error()}</div>}
+
+        <div class="form-actions">
+          <button type="button" class="btn-secondary" onClick={props.onCancel}>
+            Cancel
+          </button>
+          <button type="submit" class="btn-primary" disabled={saving()}>
+            {saving() ? 'Saving...' : (isEdit() ? 'Update Question' : 'Create Question')}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+
+#---------/admin/src/components/QuestionList.tsx/-----------
+import { For, Show } from 'solid-js';
+import type { Question } from '../App';
+import { deleteQuestion, deleteAllQuestions } from '../services/api';
+
+interface QuestionListProps {
+  questions: Question[];
+  loading: boolean;
+  onEdit: (question: Question) => void;
+  onRefresh: () => void;
+}
+
+export default function QuestionList(props: QuestionListProps) {
+  const handleDelete = async (id: string) => {
+    if (!confirm('Delete this question?')) return;
+    await deleteQuestion(id);
+    props.onRefresh();
+  };
+
+  const handleDeleteAll = async () => {
+    if (!confirm('Delete ALL questions? This cannot be undone.')) return;
+    await deleteAllQuestions();
+    props.onRefresh();
+  };
+
+  return (
+    <div class="question-list">
+      <div class="list-header">
+        <h2>Questions ({props.questions.length})</h2>
+        <button class="btn-danger" onClick={handleDeleteAll}>Delete All</button>
+      </div>
+
+      <Show when={props.loading}>
+        <div class="loading">Loading...</div>
+      </Show>
+
+      <Show when={!props.loading && props.questions.length === 0}>
+        <div class="empty">No questions yet. Add some or upload via CSV.</div>
+      </Show>
+
+      <div class="questions-grid">
+        <For each={props.questions}>
+          {(question) => (
+            <div class="question-card">
+              <div class="question-header">
+                <span class="topic">{question.topic}</span>
+                <span class="difficulty">θ={question.difficulty.toFixed(1)}</span>
+              </div>
+              <p class="question-text">{question.text}</p>
+              <div class="options-preview">
+                <For each={question.options}>
+                  {(opt) => (
+                    <span class={`option-tag ${opt === question.correct_answer ? 'correct' : ''}`}>
+                      {opt}
+                    </span>
+                  )}
+                </For>
+              </div>
+              <div class="question-actions">
+                <button class="btn-secondary" onClick={() => props.onEdit(question)}>Edit</button>
+                <button class="btn-danger-small" onClick={() => handleDelete(question.id)}>Delete</button>
+              </div>
+            </div>
+          )}
+        </For>
+      </div>
+    </div>
+  );
+}
+
+
+#---------/admin/src/index.tsx/-----------
+import { render } from 'solid-js/web';
+import App from './App';
+import './styles/global.css';
+
+const root = document.getElementById('root');
+
+if (root) {
+  render(() => <App />, root);
+}
+
+
+#---------/admin/src/services/api.ts/-----------
+import type { Question } from '../App';
+
+const API_BASE = 'http://localhost:8000';
+
+export async function getQuestions(): Promise<Question[]> {
+  const res = await fetch(`${API_BASE}/questions`);
+  return res.json();
+}
+
+export async function getQuestion(id: string): Promise<Question> {
+  const res = await fetch(`${API_BASE}/questions/${id}`);
+  return res.json();
+}
+
+export async function createQuestion(question: Omit<Question, 'id'>): Promise<{ id: string }> {
+  const res = await fetch(`${API_BASE}/questions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(question),
+  });
+  return res.json();
+}
+
+export async function updateQuestion(id: string, question: Partial<Question>): Promise<void> {
+  await fetch(`${API_BASE}/questions/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(question),
+  });
+}
+
+export async function deleteQuestion(id: string): Promise<void> {
+  await fetch(`${API_BASE}/questions/${id}`, { method: 'DELETE' });
+}
+
+export async function deleteAllQuestions(): Promise<{ deleted: number }> {
+  const res = await fetch(`${API_BASE}/questions`, { method: 'DELETE' });
+  return res.json();
+}
+
+export async function bulkCreateQuestions(questions: Omit<Question, 'id'>[]): Promise<{ inserted: number }> {
+  const res = await fetch(`${API_BASE}/questions/bulk`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(questions),
+  });
+  return res.json();
+}
+
+
+#---------/admin/src/styles/global.css/-----------
+:root {
+  --primary: #00026f;
+  --primary-hover: #84c6ff;
+  --success: #22c55e;
+  --danger: #ef4444;
+  --danger-hover: #dc2626;
+  --bg: #f8fafc;
+  --card-bg: #ffffff;
+  --text: #1e293b;
+  --text-muted: #64748b;
+  --border: #e2e8f0;
+  --shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+  --radius: 12px;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  line-height: 1.5;
+}
+
+.admin-app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.header {
+  background: var(--card-bg);
+  border-bottom: 1px solid var(--border);
+  padding: 1rem 2rem;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.header h1 {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--primary);
+  margin-bottom: 1rem;
+}
+
+.nav {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.nav-btn {
+  padding: 0.5rem 1rem;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-weight: 500;
+  cursor: pointer;
+  border-radius: 6px;
+  transition: all 0.2s;
+}
+
+.nav-btn:hover {
+  background: var(--bg);
+  color: var(--text);
+}
+
+.nav-btn.active {
+  background: var(--primary);
+  color: white;
+}
+
+.main {
+  flex: 1;
+  padding: 2rem;
+  max-width: 1200px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+.list-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1.5rem;
+}
+
+.list-header h2 {
+  font-size: 1.25rem;
+}
+
+.loading, .empty {
+  text-align: center;
+  padding: 3rem;
+  color: var(--text-muted);
+}
+
+.questions-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 1rem;
+}
+
+.question-card {
+  background: var(--card-bg);
+  border-radius: var(--radius);
+  padding: 1.25rem;
+  box-shadow: var(--shadow);
+}
+
+.question-header {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 0.75rem;
+}
+
+.topic {
+  background: #e0e7ff;
+  color: var(--primary);
+  padding: 0.2rem 0.6rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.difficulty {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  font-family: monospace;
+}
+
+.question-text {
+  font-weight: 500;
+  margin-bottom: 0.75rem;
+  line-height: 1.4;
+}
+
+.options-preview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 1rem;
+}
+
+.option-tag {
+  background: var(--bg);
+  padding: 0.2rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.option-tag.correct {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.question-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.btn-primary, .btn-secondary, .btn-danger {
+  padding: 0.6rem 1.2rem;
+  border: none;
+  border-radius: 8px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-primary {
+  background: var(--primary);
+  color: white;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--primary-hover);
+}
+
+.btn-primary:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.btn-secondary {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+
+.btn-secondary:hover {
+  background: var(--border);
+}
+
+.btn-danger {
+  background: var(--danger);
+  color: white;
+}
+
+.btn-danger:hover {
+  background: var(--danger-hover);
+}
+
+.btn-danger-small {
+  padding: 0.4rem 0.8rem;
+  background: var(--danger);
+  color: white;
+  border: none;
+  border-radius: 6px;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.question-form-container {
+  max-width: 600px;
+  margin: 0 auto;
+}
+
+.question-form-container h2 {
+  margin-bottom: 1.5rem;
+}
+
+.question-form {
+  background: var(--card-bg);
+  padding: 2rem;
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+.form-group {
+  margin-bottom: 1.25rem;
+}
+
+.form-group label {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+  font-size: 0.9rem;
+}
+
+.form-group input,
+.form-group textarea {
+  width: 100%;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 1rem;
+  font-family: inherit;
+}
+
+.form-group input:focus,
+.form-group textarea:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+}
+
+.options-inputs {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.option-input-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.option-input-row input[type="radio"] {
+  width: auto;
+  accent-color: var(--primary);
+}
+
+.option-input-row input[type="text"] {
+  flex: 1;
+}
+
+.hint {
+  display: block;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  margin-top: 0.25rem;
+}
+
+.form-actions {
+  display: flex;
+  gap: 1rem;
+  justify-content: flex-end;
+  margin-top: 1.5rem;
+}
+
+.error, .message {
+  padding: 0.75rem 1rem;
+  border-radius: 8px;
+  margin-bottom: 1rem;
+}
+
+.error {
+  background: #fef2f2;
+  color: var(--danger);
+}
+
+.message.success {
+  background: #f0fdf4;
+  color: #166534;
+}
+
+.csv-upload {
+  max-width: 700px;
+  margin: 0 auto;
+}
+
+.csv-upload h2 {
+  margin-bottom: 1.5rem;
+}
+
+.csv-instructions {
+  background: var(--card-bg);
+  padding: 1.5rem;
+  border-radius: var(--radius);
+  margin-bottom: 1.5rem;
+}
+
+.csv-instructions h3 {
+  font-size: 0.9rem;
+  margin: 1rem 0 0.5rem;
+}
+
+.csv-instructions h3:first-child {
+  margin-top: 0;
+}
+
+.csv-instructions code {
+  display: block;
+  background: var(--bg);
+  padding: 0.75rem;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  overflow-x: auto;
+}
+
+.csv-example {
+  background: var(--bg);
+  padding: 1rem;
+  border-radius: 6px;
+  font-size: 0.8rem;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.upload-section {
+  margin-bottom: 1.5rem;
+}
+
+.upload-section input {
+  padding: 0.5rem;
+}
+
+.preview-section {
+  background: var(--card-bg);
+  padding: 1.5rem;
+  border-radius: var(--radius);
+  margin-bottom: 1.5rem;
+}
+
+.preview-section h3 {
+  margin-bottom: 1rem;
+}
+
+.preview-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.preview-item {
+  padding: 0.5rem;
+  background: var(--bg);
+  border-radius: 6px;
+  font-size: 0.85rem;
+}
+
+.preview-more {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  padding: 0.5rem;
+}
+
+@media (max-width: 640px) {
+  .header {
+    padding: 1rem;
+  }
+  
+  .main {
+    padding: 1rem;
+  }
+  
+  .nav {
+    flex-wrap: wrap;
+  }
+}
+
+
+#---------/admin/tsconfig.json/-----------
+{
+  "compilerOptions": {
+    "strict": true,
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowSyntheticDefaultImports": true,
+    "esModuleInterop": true,
+    "jsx": "preserve",
+    "jsxImportSource": "solid-js",
+    "types": ["vite/client"],
+    "noEmit": true,
+    "isolatedModules": true,
+    "skipLibCheck": true
+  },
+  "include": ["src"]
+}
+
+
+#---------/admin/vite.config.ts/-----------
+import { defineConfig } from 'vite';
+import solidPlugin from 'vite-plugin-solid';
+
+export default defineConfig({
+  plugins: [solidPlugin()],
+  server: {
+    port: 3001,
+  },
+  build: {
+    target: 'esnext',
+  },
+});
+
+
+#---------/app/config.py/-----------
+import os
+
+MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
+DB_NAME = "adaptive_test"
+MAX_QUESTIONS = 10
+
+
+#---------/app/db/mongo.py/-----------
+from app.config import MONGO_URI, DB_NAME
+
+try:
+    from pymongo import MongoClient
+except ImportError as exc:
+    message = str(exc)
+    if "SON" in message and "bson" in message:
+        raise RuntimeError(
+            "PyMongo is being shadowed by the standalone 'bson' package. "
+            "Uninstall 'bson' from the active environment and reinstall 'pymongo'."
+        ) from exc
+    raise
+
+client = MongoClient(MONGO_URI)
+db = client[DB_NAME]
+
+questions_collection = db["questions"]
+sessions_collection = db["sessions"]
+
+
+#---------/app/main.py/-----------
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from app.routers import test, questions
+
+app = FastAPI(title="Adaptive Testing API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3001",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(test.router)
+app.include_router(questions.router)
+
+
+#---------/app/models/question.py/-----------
+from pydantic import BaseModel
+from typing import List
+
+
+class Question(BaseModel):
+    id: str
+    text: str
+    options: List[str]
+    correct_answer: str
+    difficulty: float
+    topic: str
+    tags: List[str] = []
+
+
+#---------/app/models/session.py/-----------
+from pydantic import BaseModel
+from typing import List
+
+
+class AnswerRecord(BaseModel):
+    question_id: str
+    correct: bool
+    difficulty: float
+
+
+class UserSession(BaseModel):
+    id: str
+    ability: float = 0.5
+    asked_questions: List[str] = []
+    answers: List[AnswerRecord] = []
+    num_answered: int = 0
+
+
+#---------/app/routers/questions.py/-----------
+from fastapi import APIRouter, HTTPException
+from typing import List
+
+try:
+    from bson import ObjectId
+except ImportError as exc:
+    message = str(exc)
+    if "SON" in message and "bson" in message:
+        raise RuntimeError(
+            "PyMongo is being shadowed by the standalone 'bson' package. "
+            "Uninstall 'bson' from the active environment and reinstall 'pymongo'."
+        ) from exc
+    raise
+
+from app.schemas.questions import QuestionCreate, QuestionUpdate
+from app.db.mongo import questions_collection
+
+router = APIRouter()
+
+
+def serialize_question(q):
+    return {
+        "id": str(q["_id"]),
+        "text": q["text"],
+        "options": q["options"],
+        "correct_answer": q["correct_answer"],
+        "difficulty": q["difficulty"],
+        "topic": q["topic"],
+        "tags": q.get("tags", []),
+    }
+
+
+@router.get("/questions")
+def list_questions():
+    questions = list(questions_collection.find())
+    return [serialize_question(q) for q in questions]
+
+
+@router.get("/questions/{question_id}")
+def get_question(question_id: str):
+    try:
+        q = questions_collection.find_one({"_id": ObjectId(question_id)})
+    except:
+        raise HTTPException(400, "Invalid question ID")
+    
+    if not q:
+        raise HTTPException(404, "Question not found")
+    
+    return serialize_question(q)
+
+
+@router.post("/questions")
+def create_question(question: QuestionCreate):
+    doc = question.model_dump()
+    result = questions_collection.insert_one(doc)
+    return {"id": str(result.inserted_id)}
+
+
+@router.post("/questions/bulk")
+def bulk_create_questions(questions: List[QuestionCreate]):
+    docs = [q.model_dump() for q in questions]
+    if not docs:
+        return {"inserted": 0}
+    result = questions_collection.insert_many(docs)
+    return {"inserted": len(result.inserted_ids)}
+
+
+@router.put("/questions/{question_id}")
+def update_question(question_id: str, question: QuestionUpdate):
+    try:
+        q = questions_collection.find_one({"_id": ObjectId(question_id)})
+    except:
+        raise HTTPException(400, "Invalid question ID")
+    
+    if not q:
+        raise HTTPException(404, "Question not found")
+    
+    update_data = {k: v for k, v in question.model_dump().items() if v is not None}
+    
+    questions_collection.update_one(
+        {"_id": ObjectId(question_id)},
+        {"$set": update_data}
+    )
+    
+    return {"message": "Updated successfully"}
+
+
+@router.delete("/questions/{question_id}")
+def delete_question(question_id: str):
+    try:
+        result = questions_collection.delete_one({"_id": ObjectId(question_id)})
+    except:
+        raise HTTPException(400, "Invalid question ID")
+    
+    if result.deleted_count == 0:
+        raise HTTPException(404, "Question not found")
+    
+    return {"message": "Deleted successfully"}
+
+
+@router.delete("/questions")
+def delete_all_questions():
+    result = questions_collection.delete_many({})
+    return {"deleted": result.deleted_count}
+
+
+#---------/app/routers/test.py/-----------
+from fastapi import APIRouter, HTTPException
+from uuid import uuid4
+
+try:
+    from bson import ObjectId
+except ImportError as exc:
+    message = str(exc)
+    if "SON" in message and "bson" in message:
+        raise RuntimeError(
+            "PyMongo is being shadowed by the standalone 'bson' package. "
+            "Uninstall 'bson' from the active environment and reinstall 'pymongo'."
+        ) from exc
+    raise
+
+from app.db.mongo import questions_collection, sessions_collection
+from app.services.adaptive_engine import update_ability
+from app.services.question_selector import select_question
+from app.services.performance_analyzer import analyze_performance
+from app.services.study_plan import generate_study_plan
+from app.schemas.api import AnswerRequest
+from app.config import MAX_QUESTIONS
+
+router = APIRouter()
+
+
+@router.post("/session/start")
+def start_session():
+    session_id = str(uuid4())
+
+    session = {
+        "_id": session_id,
+        "ability": 0.5,
+        "asked_questions": [],
+        "answers": [],
+        "num_answered": 0,
+    }
+
+    sessions_collection.insert_one(session)
+
+    return {"session_id": session_id}
+
+
+@router.get("/next-question/{session_id}")
+def get_next_question(session_id: str):
+
+    session = sessions_collection.find_one({"_id": session_id})
+
+    if not session:
+        raise HTTPException(404, "Session not found")
+
+    if session["num_answered"] >= MAX_QUESTIONS:
+        return {"message": "Test complete"}
+
+    questions = list(questions_collection.find())
+
+    q = select_question(
+        questions,
+        session["ability"],
+        session["asked_questions"],
+    )
+
+    if q is None:
+        raise HTTPException(404, "No questions available")
+
+    sessions_collection.update_one(
+        {"_id": session_id},
+        {"$push": {"asked_questions": str(q["_id"])}},
+    )
+
+    return {
+        "id": str(q["_id"]),
+        "text": q["text"],
+        "options": q["options"],
+        "difficulty": q["difficulty"],
+        "topic": q["topic"],
+    }
+
+
+@router.post("/submit-answer")
+def submit_answer(req: AnswerRequest):
+
+    session = sessions_collection.find_one({"_id": req.session_id})
+    try:
+        question_object_id = ObjectId(req.question_id)
+    except Exception:
+        raise HTTPException(400, "Invalid question ID")
+
+    question = questions_collection.find_one({"_id": question_object_id})
+
+    if not session or not question:
+        raise HTTPException(404, "Invalid session or question")
+
+    correct = req.answer == question["correct_answer"]
+
+    new_theta = update_ability(
+        session["ability"],
+        question["difficulty"],
+        correct,
+        session["num_answered"],
+    )
+
+    sessions_collection.update_one(
+        {"_id": req.session_id},
+        {
+            "$set": {"ability": new_theta},
+            "$inc": {"num_answered": 1},
+            "$push": {
+                "answers": {
+                    "question_id": req.question_id,
+                    "correct": correct,
+                    "difficulty": question["difficulty"],
+                }
+            },
+        },
+    )
+
+    return {
+        "correct": correct,
+        "ability": new_theta,
+    }
+
+
+@router.get("/finish/{session_id}")
+def finish_test(session_id: str):
+
+    session = sessions_collection.find_one({"_id": session_id})
+
+    questions = list(questions_collection.find())
+
+    analysis = analyze_performance(
+        session["answers"],
+        questions,
+    )
+
+    study_plan = generate_study_plan(analysis)
+
+    return {
+        "ability": session["ability"],
+        "analysis": analysis,
+        "study_plan": study_plan,
+    }
+
+
+#---------/app/schemas/api.py/-----------
+from pydantic import BaseModel
+
+
+class StartSessionResponse(BaseModel):
+    session_id: str
+
+
+class AnswerRequest(BaseModel):
+    session_id: str
+    question_id: str
+    answer: str
+
+
+#---------/app/schemas/questions.py/-----------
+from pydantic import BaseModel
+from typing import List, Optional
+
+
+class QuestionCreate(BaseModel):
+    text: str
+    options: List[str]
+    correct_answer: str
+    difficulty: float
+    topic: str
+    tags: List[str] = []
+
+
+class QuestionUpdate(BaseModel):
+    text: Optional[str] = None
+    options: Optional[List[str]] = None
+    correct_answer: Optional[str] = None
+    difficulty: Optional[float] = None
+    topic: Optional[str] = None
+    tags: Optional[List[str]] = None
+
+
+class QuestionResponse(BaseModel):
+    id: str
+    text: str
+    options: List[str]
+    correct_answer: str
+    difficulty: float
+    topic: str
+    tags: List[str]
+
+
+#---------/app/services/adaptive_engine.py/-----------
+import math
+
+
+def sigmoid(x: float) -> float:
+    return 1 / (1 + math.exp(-x))
+
+
+def update_ability(theta, difficulty, correct, n_answers, base_lr=0.4):
+    """
+    1PL IRT-style update with shrinking step size.
+    """
+    lr = base_lr / math.sqrt(n_answers + 1)
+
+    answer = 1 if correct else 0
+    p = sigmoid(theta - difficulty)
+
+    return theta + lr * (answer - p)
+
+
+#---------/app/services/performance_analyzer.py/-----------
+from collections import defaultdict
+
+
+def analyze_performance(answers, questions):
+    """
+    Extract structured insights from test results.
+    """
+
+    topic_stats = defaultdict(lambda: {"correct": 0, "total": 0})
+
+    difficulty_reached = 0
+
+    q_lookup = {str(q["_id"]): q for q in questions}
+
+    for a in answers:
+        q = q_lookup[a["question_id"]]
+
+        topic = q["topic"]
+        topic_stats[topic]["total"] += 1
+
+        if a["correct"]:
+            topic_stats[topic]["correct"] += 1
+
+        difficulty_reached = max(difficulty_reached, q["difficulty"])
+
+    weaknesses = []
+
+    for topic, stats in topic_stats.items():
+        acc = stats["correct"] / stats["total"]
+
+        if acc < 0.6:
+            weaknesses.append(topic)
+
+    return {
+        "weak_topics": weaknesses,
+        "topic_accuracy": topic_stats,
+        "max_difficulty": difficulty_reached,
+    }
+
+
+#---------/app/services/question_selector.py/-----------
+from app.services.adaptive_engine import sigmoid
+
+
+def select_question(questions, theta, asked_ids):
+    """
+    Select question maximizing information p(1-p).
+    """
+    candidates = [q for q in questions if str(q["_id"]) not in asked_ids]
+
+    if not candidates:
+        return None
+
+    def info(q):
+        p = sigmoid(theta - q["difficulty"])
+        return p * (1 - p)
+
+    return max(candidates, key=info)
+
+
+#---------/app/services/study_plan.py/-----------
+import os
+
+try:
+    from openai import OpenAI
+except ImportError:
+    OpenAI = None
+
+client = OpenAI() if OpenAI and os.getenv("OPENAI_API_KEY") else None
+
+
+def generate_study_plan(analysis):
+    if client is None:
+        topics = analysis["weak_topics"]
+        focus = ", ".join(topics) if topics else "your recent mistakes"
+        return "\n".join(
+            [
+                f"1. Review {focus}.",
+                "2. Practice medium-difficulty questions on those topics.",
+                "3. Re-test after correcting the concepts you missed.",
+            ]
+        )
+
+    prompt = f"""
+A student completed an adaptive test.
+
+Weak topics: {analysis["weak_topics"]}
+Max difficulty reached: {analysis["max_difficulty"]}
+
+Generate a concise 3-step study plan to improve their performance.
+Focus on the weak topics.
+Return each step on its own line.
+"""
+
+    resp = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}],
+    )
+
+    return resp.choices[0].message.content
+
+
+#---------/docker-compose.yml/-----------
+services:
+  mongo:
+    image: mongo:7
+    container_name: highscores-mongo
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.app
+    container_name: highscores-app
+    restart: unless-stopped
+    environment:
+      MONGO_URI: mongodb://mongo:27017
+    depends_on:
+      mongo:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: highscores-frontend
+    restart: unless-stopped
+    depends_on:
+      - app
+    ports:
+      - "3000:3000"
+
+  admin:
+    build:
+      context: ./admin
+      dockerfile: Dockerfile
+    container_name: highscores-admin
+    restart: unless-stopped
+    depends_on:
+      - app
+    ports:
+      - "3001:3001"
+
+volumes:
+  mongo-data:
+
+
+#---------/Dockerfile.app/-----------
+FROM python:3.13-slim
+
+WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY app ./app
+
+EXPOSE 8000
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+
+#---------/.dockerignore/-----------
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+node_modules/
+dist/
+.git/
+.gitignore
+*.log
+
+
+#---------/frontend/Dockerfile/-----------
+FROM node:22-alpine
+
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm ci
+
+COPY . .
+
+EXPOSE 3000
+
+CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "3000"]
+
+
+#---------/frontend/index.html/-----------
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Adaptive Test</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/index.tsx"></script>
+  </body>
+</html>
+
+
+#---------/frontend/package.json/-----------
+{
+  "name": "adaptive-test-frontend",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "solid-js": "^1.8.0"
+  },
+  "devDependencies": {
+    "vite": "^5.0.0",
+    "vite-plugin-solid": "^2.8.0",
+    "typescript": "^5.3.0"
+  }
+}
+
+
+#---------/frontend/src/App.tsx/-----------
+import { createSignal, Show } from 'solid-js';
+import StartScreen from './components/StartScreen';
+import TestScreen from './components/TestScreen';
+import ResultScreen from './components/ResultScreen';
+
+export type Question = {
+  id: string;
+  text: string;
+  options: string[];
+  difficulty: number;
+  topic: string;
+};
+
+export type TestState = 'start' | 'testing' | 'finished';
+
+export default function App() {
+  const [state, setState] = createSignal<TestState>('start');
+  const [sessionId, setSessionId] = createSignal<string>('');
+  const [currentQuestion, setCurrentQuestion] = createSignal<Question | null>(null);
+  const [ability, setAbility] = createSignal<number>(0.5);
+  const [questionsAnswered, setQuestionsAnswered] = createSignal<number>(0);
+  const [result, setResult] = createSignal<any>(null);
+
+  const handleStart = (sessionId: string) => {
+    setSessionId(sessionId);
+    setState('testing');
+  };
+
+  const handleQuestionReceived = (question: Question) => {
+    setCurrentQuestion(question);
+  };
+
+  const handleAnswered = (newAbility: number) => {
+    setAbility(newAbility);
+    setQuestionsAnswered((prev) => prev + 1);
+  };
+
+  const handleFinish = (result: any) => {
+    setResult(result);
+    setState('finished');
+  };
+
+  const handleRestart = () => {
+    setState('start');
+    setSessionId('');
+    setCurrentQuestion(null);
+    setAbility(0.5);
+    setQuestionsAnswered(0);
+    setResult(null);
+  };
+
+  return (
+    <div class="app">
+      <header class="header">
+        <h1>Adaptive Test</h1>
+        <Show when={state() === 'testing'}>
+          <div class="progress-bar">
+            <div
+              class="progress-fill"
+              style={{ width: `${(questionsAnswered() / 10) * 100}%` }}
+            />
+          </div>
+          <div class="stats">
+            <span>Question {questionsAnswered()}/10</span>
+            <span class="ability">Ability = {ability().toFixed(2)}</span>
+          </div>
+        </Show>
+      </header>
+
+      <main class="main">
+        <Show when={state() === 'start'}>
+          <StartScreen onStart={handleStart} />
+        </Show>
+        <Show when={state() === 'testing'}>
+          <TestScreen
+            sessionId={sessionId()}
+            currentQuestion={currentQuestion()}
+            onQuestionReceived={handleQuestionReceived}
+            onAnswered={handleAnswered}
+            onFinish={handleFinish}
+          />
+        </Show>
+        <Show when={state() === 'finished'}>
+          <ResultScreen result={result()} onRestart={handleRestart} />
+        </Show>
+      </main>
+    </div>
+  );
+}
+
+
+#---------/frontend/src/components/ResultScreen.tsx/-----------
+import { Show, For } from 'solid-js';
+
+interface ResultScreenProps {
+  result: any;
+  onRestart: () => void;
+}
+
+export default function ResultScreen(props: ResultScreenProps) {
+  const getAbilityLabel = (ability: number) => {
+    if (ability > 2) return 'Expert';
+    if (ability > 1) return 'Advanced';
+    if (ability > 0) return 'Intermediate';
+    if (ability > -1) return 'Beginner';
+    return 'Novice';
+  };
+
+  const formatStudyPlan = (plan?: string) => {
+    if (!plan) return [];
+    return plan
+      .replace(/\s+(?=\d+\.\s)/g, '\n')
+      .split(/\n+/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+  };
+
+  return (
+    <div class="result-screen">
+      <div class="result-card">
+        <h2>Test Complete!</h2>
+
+        <div class="ability-display">
+          <div class="ability-circle">
+            <span class="ability-value">{props.result?.ability?.toFixed(2)}</span>
+          </div>
+          <span class="ability-label">{getAbilityLabel(props.result?.ability || 0)}</span>
+        </div>
+
+        <Show when={props.result?.analysis}>
+          <div class="analysis-section">
+            <h3>Performance Analysis</h3>
+            <div class="topic-stats">
+              <For each={Object.entries(props.result.analysis.topic_accuracy || {})}>
+                {([topic, stats]: [string, any]) => (
+                  <div class="topic-stat">
+                    <span class="topic-name">{topic}</span>
+                    <div class="topic-bar">
+                      <div
+                        class="topic-fill"
+                        style={{
+                          width: `${((stats.correct / stats.total) * 100).toFixed(0)}%`,
+                          background:
+                            stats.correct / stats.total >= 0.6 ? '#22c55e' : '#ef4444',
+                        }}
+                      />
+                    </div>
+                    <span class="topic-accuracy">
+                      {stats.correct}/{stats.total}
+                    </span>
+                  </div>
+                )}
+              </For>
+            </div>
+
+            <Show when={props.result.analysis.weak_topics?.length > 0}>
+              <div class="weak-topics">
+                <strong>Areas to improve:</strong>
+                <ul>
+                  <For each={props.result.analysis.weak_topics}>
+                    {(topic: string) => <li>{topic}</li>}
+                  </For>
+                </ul>
+              </div>
+            </Show>
+          </div>
+        </Show>
+
+        <Show when={props.result?.study_plan}>
+          <div class="study-plan-section">
+            <h3>Your Personalized Study Plan</h3>
+            <div class="study-plan">
+              <For each={formatStudyPlan(props.result.study_plan)}>
+                {(step) => <div>{step}</div>}
+              </For>
+            </div>
+          </div>
+        </Show>
+
+        <button class="btn-primary" onClick={props.onRestart}>
+          Take Test Again
+        </button>
+      </div>
+    </div>
+  );
+}
+
+
+#---------/frontend/src/components/StartScreen.tsx/-----------
+import { createSignal } from 'solid-js';
+import { startSession } from '../services/api';
+
+interface StartScreenProps {
+  onStart: (sessionId: string) => void;
+}
+
+export default function StartScreen(props: StartScreenProps) {
+  const [loading, setLoading] = createSignal(false);
+  const [error, setError] = createSignal('');
+
+  const handleStart = async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const { session_id } = await startSession();
+      props.onStart(session_id);
+    } catch (e) {
+      setError('Failed to start session. Make sure the API is running.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div class="start-screen">
+      <div class="card">
+        <h2>Welcome to the Adaptive Test</h2>
+        <p>
+          This test uses <strong>Item Response Theory</strong> to adapt to your ability level.
+          Questions will become easier or harder based on your performance.
+        </p>
+        <ul class="features">
+          <li>10 questions total</li>
+          <li>Real-time ability estimation</li>
+          <li>Personalized study plan at the end</li>
+        </ul>
+        {error() && <div class="error">{error()}</div>}
+        <button class="btn-primary" onClick={handleStart} disabled={loading()}>
+          {loading() ? 'Starting...' : 'Start Test'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+
+#---------/frontend/src/components/TestScreen.tsx/-----------
+import { createSignal, createEffect, Show, onMount } from 'solid-js';
+import type { Question } from '../App';
+import { getNextQuestion, submitAnswer, finishTest } from '../services/api';
+
+interface TestScreenProps {
+  sessionId: string;
+  currentQuestion: Question | null;
+  onQuestionReceived: (question: Question) => void;
+  onAnswered: (ability: number) => void;
+  onFinish: (result: any) => void;
+}
+
+export default function TestScreen(props: TestScreenProps) {
+  const [selectedAnswer, setSelectedAnswer] = createSignal<string>('');
+  const [submitting, setSubmitting] = createSignal(false);
+  const [lastCorrect, setLastCorrect] = createSignal<boolean | null>(null);
+  const [loading, setLoading] = createSignal(true);
+  const [error, setError] = createSignal('');
+
+  const loadNextQuestion = async (showLoadingState = false) => {
+    if (showLoadingState) {
+      setLoading(true);
+    }
+    setError('');
+    try {
+      const question = await getNextQuestion(props.sessionId);
+      if (question === null) {
+        const result = await finishTest(props.sessionId);
+        props.onFinish(result);
+      } else {
+        setSelectedAnswer('');
+        setLastCorrect(null);
+        props.onQuestionReceived(question);
+      }
+    } catch (e) {
+      console.error(e);
+      setError(e instanceof Error ? e.message : 'Failed to load the next question');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  onMount(() => {
+    if (!props.currentQuestion) {
+      loadNextQuestion(true);
+    }
+  });
+
+  createEffect(() => {
+    if (props.currentQuestion) {
+      setLoading(false);
+    }
+  });
+
+  const handleSubmit = async () => {
+    if (!selectedAnswer() || !props.currentQuestion) return;
+
+    setSubmitting(true);
+    setError('');
+    try {
+      const result = await submitAnswer(
+        props.sessionId,
+        props.currentQuestion.id,
+        selectedAnswer()
+      );
+      setLastCorrect(result.correct);
+      props.onAnswered(result.ability);
+
+      setTimeout(() => {
+        loadNextQuestion();
+      }, 800);
+    } catch (e) {
+      console.error(e);
+      setError(e instanceof Error ? e.message : 'Failed to submit answer');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div class="test-screen">
+      <Show when={lastCorrect() !== null}>
+        <div class={`answer-toast ${lastCorrect() ? 'correct' : 'incorrect'}`}>
+          <span class="answer-toast-icon" aria-hidden="true">
+            {lastCorrect() ? '✓' : '✕'}
+          </span>
+          <strong>{lastCorrect() ? 'Correct' : 'Incorrect'}</strong>
+        </div>
+      </Show>
+
+      <Show when={loading()}>
+        <div class="loading">Loading question...</div>
+      </Show>
+
+      <Show when={!loading() && props.currentQuestion}>
+        <div class="question-card">
+          <Show when={error()}>
+            <div class="error">{error()}</div>
+          </Show>
+          <div class="question-meta">
+            <span class="topic">{props.currentQuestion!.topic}</span>
+            <span class="difficulty">Difficulty: {props.currentQuestion!.difficulty.toFixed(1)}</span>
+          </div>
+
+          <h3 class="question-text">{props.currentQuestion!.text}</h3>
+
+          <div class="options">
+            {props.currentQuestion!.options.map((option) => (
+              <button
+                class={`option ${selectedAnswer() === option ? 'selected' : ''} ${
+                  lastCorrect() !== null && selectedAnswer() === option
+                    ? lastCorrect()
+                      ? 'correct'
+                      : 'incorrect'
+                    : ''
+                }`}
+                onClick={() => setSelectedAnswer(option)}
+                disabled={submitting() || lastCorrect() !== null}
+              >
+                {option}
+              </button>
+            ))}
+          </div>
+
+          <button
+            class="btn-primary"
+            onClick={handleSubmit}
+            disabled={!selectedAnswer() || submitting() || lastCorrect() !== null}
+          >
+            {submitting() ? 'Submitting...' : 'Submit Answer'}
+          </button>
+        </div>
+      </Show>
+    </div>
+  );
+}
+
+
+#---------/frontend/src/index.tsx/-----------
+import { render } from 'solid-js/web';
+import App from './App';
+import './styles/global.css';
+
+const root = document.getElementById('root');
+
+if (root) {
+  render(() => <App />, root);
+}
+
+
+#---------/frontend/src/services/api.ts/-----------
+const API_BASE = 'http://localhost:8000';
+
+async function parseJsonResponse(res: Response) {
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.detail || data.message || 'Request failed');
+  }
+  return data;
+}
+
+export async function startSession(): Promise<{ session_id: string }> {
+  const res = await fetch(`${API_BASE}/session/start`, { method: 'POST' });
+  return parseJsonResponse(res);
+}
+
+export async function getNextQuestion(sessionId: string) {
+  const res = await fetch(`${API_BASE}/next-question/${sessionId}`);
+  const data = await res.json();
+  if (data.message === 'Test complete') {
+    return null;
+  }
+  if (!res.ok) {
+    throw new Error(data.detail || data.message || 'Failed to get question');
+  }
+  return data;
+}
+
+export async function submitAnswer(
+  sessionId: string,
+  questionId: string,
+  answer: string
+): Promise<{ correct: boolean; ability: number }> {
+  const res = await fetch(`${API_BASE}/submit-answer`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId, question_id: questionId, answer }),
+  });
+  return parseJsonResponse(res);
+}
+
+export async function finishTest(sessionId: string) {
+  const res = await fetch(`${API_BASE}/finish/${sessionId}`);
+  return parseJsonResponse(res);
+}
+
+
+#---------/frontend/src/styles/global.css/-----------
+:root {
+  --primary: #00026f;
+  --primary-hover: #84c6ff;
+  --success: #22c55e;
+  --error: #ef4444;
+  --bg: #f8fafc;
+  --card-bg: #ffffff;
+  --text: #1e293b;
+  --text-muted: #64748b;
+  --border: #e2e8f0;
+  --shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+  --radius: 12px;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  line-height: 1.6;
+}
+
+.app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.header {
+  background: var(--card-bg);
+  border-bottom: 1px solid var(--border);
+  padding: 1rem 2rem;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.header h1 {
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: var(--primary);
+  margin-bottom: 0.75rem;
+}
+
+.progress-bar {
+  height: 6px;
+  background: var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 0.5rem;
+}
+
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--primary), #818cf8);
+  transition: width 0.3s ease;
+}
+
+.stats {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.875rem;
+  color: var(--text-muted);
+}
+
+.ability {
+  font-weight: 600;
+  color: var(--primary);
+  font-family: 'SF Mono', Monaco, monospace;
+}
+
+.main {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+}
+
+.card, .start-screen, .test-screen, .result-screen {
+  width: 100%;
+  max-width: 540px;
+}
+
+.card, .question-card, .result-card {
+  background: var(--card-bg);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 2rem;
+}
+
+.start-screen h2 {
+  font-size: 1.5rem;
+  margin-bottom: 1rem;
+  color: var(--text);
+}
+
+.start-screen p {
+  color: var(--text-muted);
+  margin-bottom: 1.5rem;
+}
+
+.features {
+  list-style: none;
+  margin-bottom: 1.5rem;
+}
+
+.features li {
+  padding: 0.5rem 0;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.features li::before {
+  content: '✓';
+  color: var(--success);
+  font-weight: 600;
+}
+
+.error {
+  background: #fef2f2;
+  color: var(--error);
+  padding: 0.75rem 1rem;
+  border-radius: 8px;
+  margin-bottom: 1rem;
+  font-size: 0.875rem;
+}
+
+.btn-primary {
+  width: 100%;
+  padding: 0.875rem 1.5rem;
+  background: var(--primary);
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--primary-hover);
+  transform: translateY(-1px);
+}
+
+.btn-primary:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.loading {
+  text-align: center;
+  color: var(--text-muted);
+  padding: 2rem;
+}
+
+.question-meta {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 1.5rem;
+}
+
+.topic {
+  background: #e0e7ff;
+  color: var(--primary);
+  padding: 0.25rem 0.75rem;
+  border-radius: 20px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.difficulty {
+  color: var(--text-muted);
+  font-size: 0.875rem;
+  font-family: 'SF Mono', Monaco, monospace;
+}
+
+.question-text {
+  font-size: 1.25rem;
+  font-weight: 600;
+  margin-bottom: 1.5rem;
+  line-height: 1.5;
+}
+
+.options {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin-bottom: 1.5rem;
+}
+
+.option {
+  padding: 1rem 1.25rem;
+  background: var(--bg);
+  border: 2px solid var(--border);
+  border-radius: 8px;
+  font-size: 1rem;
+  text-align: left;
+  cursor: pointer;
+  transition: all 0.2s;
+  color: var(--text);
+}
+
+.option:hover:not(:disabled) {
+  border-color: var(--primary);
+  background: #f5f3ff;
+}
+
+.option.selected {
+  border-color: var(--primary);
+  background: #eef2ff;
+}
+
+.option.correct {
+  border-color: var(--success);
+  background: #f0fdf4;
+}
+
+.option.incorrect {
+  opacity: 0.5;
+}
+
+.answer-toast {
+  position: fixed;
+  top: 1.25rem;
+  right: 1.25rem;
+  z-index: 1000;
+  min-width: 180px;
+  max-width: min(240px, calc(100vw - 2rem));
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  padding: 0.95rem 1rem;
+  border-radius: 16px;
+  box-shadow: 0 18px 40px -18px rgb(15 23 42 / 0.45);
+  backdrop-filter: blur(14px);
+  font-size: 0.875rem;
+  animation: toastIn 0.22s ease;
+}
+
+.answer-toast.correct {
+  background: rgb(240 253 244 / 0.95);
+  color: #166534;
+  border: 1px solid rgb(187 247 208 / 0.9);
+}
+
+.answer-toast.incorrect {
+  background: rgb(254 242 242 / 0.96);
+  color: #991b1b;
+  border: 1px solid rgb(254 202 202 / 0.9);
+}
+
+.answer-toast-icon {
+  width: 2rem;
+  height: 2rem;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1rem;
+  font-weight: 800;
+  flex: 0 0 auto;
+}
+
+.answer-toast.correct .answer-toast-icon {
+  background: linear-gradient(135deg, #22c55e, #16a34a);
+  color: white;
+}
+
+.answer-toast.incorrect .answer-toast-icon {
+  background: linear-gradient(135deg, #ef4444, #dc2626);
+  color: white;
+}
+
+.answer-toast strong {
+  font-size: 0.92rem;
+  line-height: 1.1;
+  font-weight: 700;
+}
+
+@keyframes toastIn {
+  from { opacity: 0; transform: translateX(24px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+.result-card h2 {
+  text-align: center;
+  font-size: 1.75rem;
+  margin-bottom: 1.5rem;
+}
+
+.ability-display {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin-bottom: 2rem;
+}
+
+.ability-circle {
+  width: 100px;
+  height: 100px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--primary), #818cf8);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 0.75rem;
+}
+
+.ability-value {
+  font-size: 2rem;
+  font-weight: 700;
+  color: white;
+  font-family: 'SF Mono', Monaco, monospace;
+}
+
+.ability-label {
+  font-size: 1rem;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.analysis-section, .study-plan-section {
+  margin-bottom: 1.5rem;
+}
+
+.analysis-section h3, .study-plan-section h3 {
+  font-size: 1rem;
+  margin-bottom: 1rem;
+  color: var(--text);
+}
+
+.topic-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.topic-stat {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.topic-name {
+  width: 80px;
+  font-size: 0.875rem;
+  color: var(--text-muted);
+}
+
+.topic-bar {
+  flex: 1;
+  height: 8px;
+  background: var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.topic-fill {
+  height: 100%;
+  transition: width 0.5s ease;
+}
+
+.topic-accuracy {
+  width: 40px;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  text-align: right;
+}
+
+.weak-topics {
+  margin-top: 1rem;
+  padding: 1rem;
+  background: #fef2f2;
+  border-radius: 8px;
+  font-size: 0.875rem;
+}
+
+.weak-topics ul {
+  margin-top: 0.5rem;
+  padding-left: 1.25rem;
+}
+
+.weak-topics li {
+  color: var(--error);
+}
+
+.study-plan {
+  padding: 1rem;
+  background: #f8fafc;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  white-space: pre-wrap;
+  line-height: 1.7;
+}
+
+.result-card .btn-primary {
+  margin-top: 1rem;
+}
+
+@media (max-width: 640px) {
+  .header {
+    padding: 1rem;
+  }
+  
+  .main {
+    padding: 1rem;
+  }
+  
+  .card, .question-card, .result-card {
+    padding: 1.5rem;
+  }
+
+  .answer-toast {
+    top: 0.75rem;
+    right: 0.5rem;
+    left: 0.5rem;
+    max-width: none;
+  }
+}
+
+
+#---------/frontend/tsconfig.json/-----------
+{
+  "compilerOptions": {
+    "strict": true,
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowSyntheticDefaultImports": true,
+    "esModuleInterop": true,
+    "jsx": "preserve",
+    "jsxImportSource": "solid-js",
+    "types": ["vite/client"],
+    "noEmit": true,
+    "isolatedModules": true,
+    "skipLibCheck": true
+  },
+  "include": ["src"]
+}
+
+
+#---------/frontend/vite.config.ts/-----------
+import { defineConfig } from 'vite';
+import solidPlugin from 'vite-plugin-solid';
+
+export default defineConfig({
+  plugins: [solidPlugin()],
+  server: {
+    port: 3000,
+  },
+  build: {
+    target: 'esnext',
+  },
+});
+
+
+#---------/public/Save project into a file.sh/-----------
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${1:-.}"
+OUT="${2:-highscores-project.txt}"
+
+cd "$ROOT"
+: > "$OUT"
+
+serialize_file() {
+  local f="$1"
+  echo "#---------/${f}/-----------" >> "$OUT"
+  cat "$f" >> "$OUT"
+  printf "\n\n" >> "$OUT"
+}
+
+# Generic extension mode:
+#   ./Save\ project\ into\ a\ file.sh . serialized.txt tsx
+if [[ "${3:-}" != "" ]]; then
+  EXT="$3"
+  find . -type f -name "*.${EXT}" \
+    ! -path './node_modules/*' \
+    ! -path './frontend/node_modules/*' \
+    ! -path './admin/node_modules/*' \
+    ! -path './dist/*' \
+    ! -path './frontend/dist/*' \
+    ! -path './admin/dist/*' \
+    ! -path './__pycache__/*' \
+    ! -path './app/__pycache__/*' \
+    ! -name '*.pyc' \
+    | sort | while read -r f; do
+      serialize_file "${f#./}"
+    done
+
+  echo "Serialized into $OUT"
+  exit 0
+fi
+
+# Project-specific serialization for this repo.
+find . -type f \
+  ! -path './.git/*' \
+  ! -path './node_modules/*' \
+  ! -path './frontend/node_modules/*' \
+  ! -path './admin/node_modules/*' \
+  ! -path './dist/*' \
+  ! -path './frontend/dist/*' \
+  ! -path './admin/dist/*' \
+  ! -path './__pycache__/*' \
+  ! -path './app/__pycache__/*' \
+  ! -path './.pytest_cache/*' \
+  ! -name '*.pyc' \
+  ! -name '*.pyo' \
+  ! -name '*.log' \
+  ! -name '.env' \
+  ! -name '.env.*' \
+  ! -name 'package-lock.json' \
+  ! -path './public/base scaffold.md' \
+  ! -path './public/extension v1.md' \
+  | sort | while read -r f; do
+    case "$f" in
+      ./README.md|\
+      ./.dockerignore|\
+      ./docker-compose.yml|\
+      ./Dockerfile.app|\
+      ./requirements.txt|\
+      ./app/*|\
+      ./frontend/package.json|\
+      ./frontend/tsconfig.json|\
+      ./frontend/vite.config.ts|\
+      ./frontend/Dockerfile|\
+      ./frontend/index.html|\
+      ./frontend/src/*|\
+      ./admin/package.json|\
+      ./admin/tsconfig.json|\
+      ./admin/vite.config.ts|\
+      ./admin/Dockerfile|\
+      ./admin/index.html|\
+      ./admin/src/*|\
+      ./public/Save\ project\ into\ a\ file.sh)
+        serialize_file "${f#./}"
+        ;;
+    esac
+  done
+
+echo "Serialized into $OUT"
+
+
+#---------/README.md/-----------
+# Highscores App Assignment
+
+This repo contains:
+
+- `app`: FastAPI backend
+- `frontend`: primary SolidJS test app
+- `admin`: SolidJS admin app for question management and CSV upload
+
+## Docker quick start (Reccomended)
+
+Use this path if you want the full stack started by Docker. You do not need to install Python packages or Node packages on your machine for this flow.
+
+### Prerequisites
+
+- Docker
+- Docker Compose
+
+### Start everything
+
+From the repo root:
+
+```bash
+docker compose up --build -d
+```
+
+This will:
+
+- pull `mongo:7`
+- install backend dependencies inside the backend image
+- install frontend dependencies inside the frontend image
+- install admin dependencies inside the admin image
+- start MongoDB, the FastAPI API, the frontend, and the admin app
+
+### URLs
+
+- frontend: `http://localhost:3000`
+- admin: `http://localhost:3001`
+- backend API: `http://localhost:8000`
+
+### Useful commands
+
+View running containers:
+
+```bash
+docker compose ps
+```
+
+View logs:
+
+```bash
+docker compose logs -f mongo app frontend admin
+```
+
+Stop everything:
+
+```bash
+docker compose down
+```
+
+Stop everything and remove Mongo data:
+
+```bash
+docker compose down -v
+```
+
+### Docker files
+
+- [docker-compose.yml](/home/ansarimn/Downloads/highscores-app-assignment/docker-compose.yml)
+- [Dockerfile.app](/home/ansarimn/Downloads/highscores-app-assignment/Dockerfile.app)
+- [frontend/Dockerfile](/home/ansarimn/Downloads/highscores-app-assignment/frontend/Dockerfile)
+- [admin/Dockerfile](/home/ansarimn/Downloads/highscores-app-assignment/admin/Dockerfile)
+
+## Manual
+
+Use this path only if you want to run each app directly on your machine without Docker for the app processes.
+
+### Prerequisites
+
+- Python 3.13+
+- Node.js 22+
+- npm
+- Docker or a local MongoDB installation
+
+### 1. Install backend dependencies
+
+```bash
+python3 -m pip install -r requirements.txt
+```
+
+Important:
+
+- Do not install the standalone `bson` package.
+- If you already have it installed, remove it and reinstall `pymongo`:
+
+```bash
+python3 -m pip uninstall -y bson
+python3 -m pip install --force-reinstall pymongo
+```
+
+### 2. Install frontend dependencies
+
+```bash
+cd frontend
+npm install
+cd ..
+```
+
+### 3. Install admin dependencies
+
+```bash
+cd admin
+npm install
+cd ..
+```
+
+### 4. Start MongoDB
+
+If you want Mongo via Docker:
+
+```bash
+docker run -d \
+  --name highscores-mongo \
+  -p 127.0.0.1:27017:27017 \
+  -v /tmp/highscores-mongo:/data/db \
+  mongo:7
+```
+
+If the container already exists:
+
+```bash
+docker start highscores-mongo
+```
+
+### 5. Start the backend
+
+From the repo root:
+
+```bash
+python3 -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+### 6. Start the primary frontend
+
+```bash
+cd frontend
+npm run dev
+```
+
+Runs on:
+
+- `http://localhost:3000`
+
+### 7. Start the admin app
+
+```bash
+cd admin
+npm run dev
+```
+
+Runs on:
+
+- `http://localhost:3001`
+
+## Question Upload CSV Format
+
+The admin CSV upload expects these columns:
+
+```text
+text,topic,difficulty,option1,option2,option3,option4,correct_answer,tags
+```
+
+Example:
+
+```csv
+text,topic,difficulty,option1,option2,option3,option4,correct_answer,tags
+"What is 2+2?",Arithmetic,0.1,3,4,5,6,4,"addition,basic"
+```
+
+Notes:
+
+- `tags` must be comma-separated
+- `correct_answer` must match one of the option values exactly
+
+## Troubleshooting
+
+### Backend fails with `cannot import name 'SON' from 'bson'`
+
+Your Python environment has the wrong `bson` package installed.
+
+Fix:
+
+```bash
+python3 -m pip uninstall -y bson
+python3 -m pip install --force-reinstall pymongo
+```
+
+### Backend starts but requests hang or fail with Mongo timeout
+
+MongoDB is not running on the configured URI.
+
+Default backend config expects:
+
+```text
+mongodb://localhost:27017
+```
+
+### Browser shows CORS errors
+
+The backend is configured for:
+
+- `http://localhost:3000`
+- `http://127.0.0.1:3000`
+- `http://localhost:3001`
+- `http://127.0.0.1:3001`
+
+If you change ports, update backend CORS config in [app/main.py](/home/ansarimn/Downloads/highscores-app-assignment/app/main.py).
+
+
+#---------/requirements.txt/-----------
+fastapi
+uvicorn
+pymongo
+pydantic
+python-dotenv
+openai
+
+
