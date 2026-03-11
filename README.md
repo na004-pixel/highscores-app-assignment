@@ -169,3 +169,20 @@ For further scalability,
 - I chose solidjs for its simplicity. React and nextjs are a lot more powerful but they arent needed here (yet)
 - Questions sources csv so that it works seamlessly with excel. Excel is more ergonomic and reliable than manually writing JSON. The only alternative is a proper frontend for questions. that is also there as an alternative
 
+# On the use of AI
+
+While AI dramatically accelerated the writing of syntax, the core value of this submission lies in the architectural decisions used to orchestrate that AI. In the current era of development, AI can easily "one-shot" a file or a function, but it relies entirely on the developer to define the system boundaries. 
+
+Here are the key philosophies I applied while guiding the AI through this project:
+
+## 1. Treating Languages as Disposable Tools (The Polyglot Monorepo)
+I have extensive experience building large applications in Next.js. The "easy" route would have been to build a Next.js monolith and force the Python/math requirements into a JS runtime, or rely entirely on Python templates. Instead, I treated languages as disposable tools tailored to specific domains: Python for the backend (where AI/math ecosystems thrive) and SolidJS for a lightweight, reactive frontend. Running a polyglot monorepo (API, User Frontend, and Admin Frontend) introduces complexity that terrifies many junior developers, but with AI handling the syntax overhead, I was free to choose the objectively correct tool for each boundary. 
+
+## Taming the Polyglot Environment with Docker
+Having three independent apps running simultaneously creates a massive orchestration problem (the "how do I start three servers?" dilemma). While my experience with Docker is limited, I recognized architecturally that Docker is the exact cure for polyglot chaos. AI can easily write a `Dockerfile` or `docker-compose.yml`, but independently recognizing *where* and *why* Docker fits into the system to prevent environment hell is a human architectural decision. 
+
+## Enforcing "Universal Separation of Concerns"
+Modern AI can generate a reasonably clean architecture on the first try. However, as an app grows, AI naturally defaults to the path of least resistance—often suggesting tightly coupled, sloppy solutions to fix bugs quickly. I acted as a "purist" for separation of concerns. I forced the AI to respect strict REST boundaries, kept the Admin app entirely isolated from the User app, and ensured business logic (like the IRT math) never bled into the API routers. The AI wrote the code, but I enforced the structural discipline.
+
+## Comprehension Over Blind Faith
+AI works flawlessly when guided correctly, but its output is never cryptic to me. Because I maintained strict architectural boundaries, I always understood exactly what the AI was generating. Even if the AI had hallucinated a port, broken a CORS policy, or messed up a math function, I possessed the system-level understanding required to hunt down the logic and ruthlessly refactor it. The AI was the engine, but I was always the driver.
